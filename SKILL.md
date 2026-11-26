@@ -1,9 +1,9 @@
 ---
 name: oil-delegate
-description: "把边界清楚的单次任务委托给 Claude Code（cc）、WorkBuddy（wb）、Antigravity（agy）、Codex、Cursor、OpenCode、DeepSeek Harness（dsh）、Grok Build（grok）或 Kimi Code（kimi）CLI，返回结构化结果并续接原会话；处理首次静默扫描、启用执行器与默认选择，并可按用途（代码审查、方案挑刺、疑难会诊、实现）记住各自交给谁。用户明确要求 oil-delegate、统一调用或用上述全称/别名继续这些外部 CLI Agent 时使用；不用于普通直接问答或显式 /codex。"
+description: "把边界清楚的单次任务委托给 Claude Code（cc）、WorkBuddy（wb）、Antigravity（agy）、Codex、Cursor、OpenCode、DeepSeek Harness（dsh）、Grok Build（grok）或 Kimi Code（kimi）CLI，或用模型快捷名 SOL / ASTRA（经 Codex 调用 OpenAI GPT-6.2 Sol / Astra），返回结构化结果并续接原会话；处理首次静默扫描、启用执行器与默认选择，并可按用途（代码审查、方案挑刺、疑难会诊、实现）记住各自交给谁。用户明确要求 oil-delegate、提到 SOL 或 ASTRA、统一调用或用上述全称/别名继续这些外部 CLI Agent 时使用；不用于普通直接问答或显式 /codex。"
 license: MIT
 metadata:
-  version: "0.7.0"
+  version: "0.7.0+models.1"
 ---
 
 # oil-delegate
@@ -26,6 +26,27 @@ metadata:
 | 续接任务 | 对同一 CLI 的上一轮结果追问或返工 | 核对 runner 与 session ID → `run --session` | 汇报本轮变化 |
 | 按角色委托 | 其他 Skill 委托审查、方案挑刺、会诊或实现 | `run --role` → 按返回状态处理 | 汇报结论与验证证据 |
 | 配置与诊断 | 查看环境、预览权限或处理失败 | `onboard --scan`、`config`、`run --dry-run` | 给出明确下一步 |
+
+## 模型快捷名：SOL 与 ASTRA
+
+用户说“用 SOL / 用 ASTRA / 叫 sol 来…”时，直接把快捷名当 runner 传入，不区分大小写：
+
+| 快捷名 | 实际执行 | 模型 ID | 适合 |
+| --- | --- | --- | --- |
+| `sol` | Codex CLI | `gpt-6.2-sol` | 日常实现、修复、审查，速度与成本均衡 |
+| `astra` | Codex CLI | `gpt-6.2-astra` | 最难的问题、架构、疑难会诊，成本较高 |
+
+```text
+DELEGATE run --runner sol   --workspace "<项目绝对路径>" --prompt "<任务>"
+DELEGATE run --runner astra --effort high --workspace "<项目绝对路径>" --prompt "<任务>"
+```
+
+- `--effort low|medium|high|xhigh` 只在用户要求更深/更快思考时传；不传则沿用 Codex 自己的设置。两个模型都不接受 `none`。
+- `--model <ID>` 可覆盖快捷名的模型，也可单独用于 claude、codex、cursor、opencode；其他 runner 会拒绝 `--model`，不静默忽略。
+- 快捷名可用于默认值与角色：`config --set-default-runner sol`、`config --set-role diagnose=sol,astra`、`config --set-role review=astra`。
+- 模型改版时，在 `~/.oil-delegate/config.json` 写 `"model_presets": {"sol": {"model": "<新 ID>"}}` 即可覆盖，不必改代码。
+- 前提：已安装 Codex CLI 并登录（ChatGPT Plus/Pro/Business/Enterprise/Edu 或 `OPENAI_API_KEY`）；未登录时如实报告，不替用户登录。
+- 续接时用同一个快捷名加 `--session`，模型会一并带上。
 
 ## 委托契约
 

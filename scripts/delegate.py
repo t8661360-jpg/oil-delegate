@@ -69,6 +69,18 @@ RUNNER_ALIASES = {
     "cursor-agent": "cursor",
     "cursor-cli": "cursor",
 }
+# Model shortcuts: one name picks both a runner and a model ("sol" -> Codex running GPT-6.2 Sol).
+# Override a model ID or add a shortcut in config.json:
+#   "model_presets": {"sol": {"runner": "codex", "model": "gpt-6.2-sol"}}
+MODEL_PRESETS = {
+    "sol": {"runner": "codex", "model": "gpt-6.2-sol"},
+    "astra": {"runner": "codex", "model": "gpt-6.2-astra"},
+}
+ACTIVE_PRESETS: dict[str, dict[str, str]] = {k: dict(v) for k, v in MODEL_PRESETS.items()}
+# Runners whose CLI takes a model flag, and those that also take a reasoning effort.
+MODEL_RUNNERS = {"claude", "codex", "cursor", "opencode"}
+EFFORT_RUNNERS = {"claude", "codex"}
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh")
 # Bump when the `run --json` result fields change incompatibly.
 CONTRACT_VERSION = 1
 # Interactive commands that reopen a headless session; {bin} is the detected executable name.
@@ -150,6 +162,7 @@ def load_config(state_dir: Path) -> dict[str, Any]:
         raise DelegateError("config.runner_paths must be an object")
     if not isinstance(merged.get("roles"), dict):
         raise DelegateError("config.roles must be an object")
+    refresh_presets(merged)
     return merged
 
 
@@ -172,12 +185,41 @@ def save_config(state_dir: Path, config: dict[str, Any]) -> None:
     atomic_write_json(state_dir / "config.json", config)
 
 
+def refresh_presets(config: dict[str, Any]) -> None:
+    ACTIVE_PRESETS.clear()
+    ACTIVE_PRESETS.update({k: dict(v) for k, v in MODEL_PRESETS.items()})
+    for name, value in (config.get("model_presets") or {}).items():
+        if not isinstance(value, dict) or not str(value.get("model", "")).strip():
+            continue
+        key = str(name).strip().lower()
+        runner = str(value.get("runner") or ACTIVE_PRESETS.get(key, {}).get("runner") or "codex").strip().lower()
+        runner = RUNNER_ALIASES.get(runner, runner)
+        if runner in SUPPORTED_RUNNERS and key not in SUPPORTED_RUNNERS and key not in RUNNER_ALIASES:
+            ACTIVE_PRESETS[key] = {"runner": runner, "model": str(value["model"]).strip()}
+
+
+def preset_model(value: str | None) -> str | None:
+    if not value:
+        return None
+    preset = ACTIVE_PRESETS.get(value.strip().lower())
+    return preset["model"] if preset else None
+
+
+def choice_name(value: str) -> str:
+    """Name to store for a runner choice: a model shortcut keeps its own name, anything else its runner."""
+    key = value.strip().lower()
+    return key if key in ACTIVE_PRESETS else canonical_runner(value)
+
+
 def canonical_runner(value: str) -> str:
     runner = value.strip().lower()
+    if runner in ACTIVE_PRESETS:
+        return ACTIVE_PRESETS[runner]["runner"]
     runner = RUNNER_ALIASES.get(runner, runner)
     if runner not in SUPPORTED_RUNNERS:
         raise DelegateError(
             f"Unsupported runner '{value}'. Choose from: {', '.join(SUPPORTED_RUNNERS)}"
+            f" or a model shortcut: {', '.join(ACTIVE_PRESETS)}"
         )
     return runner
 
@@ -407,7 +449,7 @@ def apply_default_runner(config: dict[str, Any], raw: str) -> None:
     if runner not in enabled:
         enabled.append(runner)
     config["enabled_runners"] = enabled
-    config["default_runner"] = runner
+    config["default_runner"] = choice_name(value)
     config["onboarded"] = True
 
 
@@ -435,11 +477,11 @@ def apply_role(config: dict[str, Any], assignment: str) -> list[str]:
     choices: list[str] = []
     for item in value.replace(";", ",").split(","):
         if item.strip():
-            choices.append(HOST_AGENT if item.strip() == HOST_AGENT else canonical_runner(item))
+            choices.append(HOST_AGENT if item.strip() == HOST_AGENT else choice_name(item))
     if len(choices) != slots or len(set(choices)) != slots:
         need = f"{slots} different choices" if slots > 1 else "exactly one choice"
         raise DelegateError(f"Role '{role}' needs {need}; got: {value_raw.strip()}")
-    runners = [choice for choice in choices if choice != HOST_AGENT]
+    runners = list(dict.fromkeys(canonical_runner(c) for c in choices if c != HOST_AGENT))
     if ROLE_MODES[role] == "read":
         blocked = [runner for runner in runners if runner in READ_ONLY_UNSUPPORTED]
         if blocked:
@@ -538,6 +580,7 @@ def config_view_payload(state_dir: Path, config: dict[str, Any]) -> dict[str, An
         "runner_paths": config.get("runner_paths", {}),
         "roles": config.get("roles", {}),
         "role_names": list(ROLE_MODES),
+        "model_presets": dict(ACTIVE_PRESETS),
     }
 
 
@@ -657,15 +700,28 @@ def build_invocation(
     session_id: str | None,
     mode: str,
     dsh_capabilities: dict[str, Any] | None,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> tuple[list[str], str | None, dict[str, str]]:
     env: dict[str, str] = {}
     stdin_input: str | None = None
+    if model and runner not in MODEL_RUNNERS:
+        raise DelegateError(
+            f"--model is not supported for {runner}; it keeps the model set in its own CLI "
+            f"(supported: {', '.join(sorted(MODEL_RUNNERS))})"
+        )
+    if effort and runner not in EFFORT_RUNNERS:
+        raise DelegateError(f"--effort is not supported for {runner} (supported: {', '.join(sorted(EFFORT_RUNNERS))})")
 
     if runner == "claude":
         cmd = [binary]
         if session_id:
             cmd.extend(["--resume", session_id])
         cmd.extend(["-p", prompt, "--output-format", "json"])
+        if model:
+            cmd.extend(["--model", model])
+        if effort:
+            cmd.extend(["--effort", effort])
         cmd.extend(
             ["--permission-mode", "plan", "--permission-prompts", "none"]
             if mode == "read"
@@ -701,6 +757,10 @@ def build_invocation(
             permission = ["-c", 'sandbox_mode="read-only"'] if session_id else ["--sandbox", "read-only"]
         else:
             permission = ["--dangerously-bypass-approvals-and-sandbox"]
+        if model:
+            permission.extend(["-c", f"model={json.dumps(model)}"])
+        if effort:
+            permission.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
         if session_id:
             cmd = [binary, "exec", "resume", "--json", "--skip-git-repo-check", *permission, session_id, "-"]
         else:
@@ -732,6 +792,8 @@ def build_invocation(
             cmd.extend(["--session", session_id])
         if mode == "read":
             cmd.extend(["--agent", "plan"])
+        if model:
+            cmd.extend(["--model", model])
         cmd.append(prompt)
         permission = {
             "*": "allow",
@@ -766,6 +828,8 @@ def build_invocation(
         cmd = [binary, "-p", "--output-format", "json", "--workspace", str(workspace), "--trust"]
         if session_id:
             cmd.extend(["--resume", session_id])
+        if model:
+            cmd.extend(["--model", model])
         cmd.extend(["--mode", "plan"] if mode == "read" else ["--force"])
         return cmd, prompt, env
 
@@ -777,13 +841,19 @@ def resume_command(
     binary: str,
     session_id: str | None,
     source: str | None = None,
+    model: str | None = None,
 ) -> str | None:
     if not session_id:
         return None
     # Standard executable names stay short unless resolved from an app bundle or custom path.
     use_short = source not in ("chatgpt-app", "workbuddy-app") and Path(binary).name in RUNNER_BINARIES[runner]
     name = Path(binary).name if use_short else binary
-    return shlex.join(part.format(bin=name, sid=session_id) for part in RESUME_TEMPLATES[runner])
+    parts = [part.format(bin=name, sid=session_id) for part in RESUME_TEMPLATES[runner]]
+    if model and runner == "codex":
+        parts[1:1] = ["-c", f"model={json.dumps(model)}"]
+    elif model and runner in MODEL_RUNNERS:
+        parts.extend(["--model", model])
+    return shlex.join(parts)
 
 
 def emit(payload: dict[str, Any]) -> None:
@@ -1039,6 +1109,8 @@ def execute_run(
     require_enabled: bool = True,
 ) -> int:
     runner = canonical_runner(args.runner)
+    model = getattr(args, "model", None) or preset_model(args.runner)
+    effort = getattr(args, "effort", None)
     if require_enabled and runner not in config.get("enabled_runners", []):
         raise DelegateError(f"Runner '{runner}' is not enabled; enable it with onboard or config")
     workspace = resolve_workspace(args.workspace)
@@ -1057,6 +1129,8 @@ def execute_run(
         args.session,
         args.mode,
         capabilities,
+        model,
+        effort,
     )
     safe_command = redact_command(command, prompt)
 
@@ -1064,6 +1138,8 @@ def execute_run(
         payload = {
             "status": "DRY_RUN",
             "runner": runner,
+            "model": model,
+            "effort": effort,
             "role": getattr(args, "resolved_role", None),
             "workspace": str(workspace),
             "mode": args.mode,
@@ -1138,7 +1214,8 @@ def execute_run(
     elapsed = time.monotonic() - started
     finished_at = now_iso()
 
-    markdown = f"## Summary ({runner})\n\n{parsed['response']}\n"
+    label = f"{runner}, {model}" if model else runner
+    markdown = f"## Summary ({label})\n\n{parsed['response']}\n"
     if parsed["error"]:
         markdown += f"\n## Error\n\n```text\n{parsed['error']}\n```\n"
     paths["output"].write_text(markdown, encoding="utf-8")
@@ -1146,6 +1223,8 @@ def execute_run(
         **parsed,
         "exit_code": exit_code,
         "runner": runner,
+        "model": model,
+        "effort": effort,
         "role": getattr(args, "resolved_role", None),
         "workspace": str(workspace),
         "mode": args.mode,
@@ -1154,6 +1233,7 @@ def execute_run(
             binary_info["path"],
             parsed["session_id"],
             source=binary_info.get("source"),
+            model=model,
         ),
         "command": safe_command,
         "environment_overrides": env_updates,
@@ -1245,7 +1325,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="Run or resume one delegated task")
     run.add_argument("--prompt", required=True)
-    run.add_argument("--runner")
+    run.add_argument("--runner", help="Runner name, alias, or model shortcut (sol, astra)")
+    run.add_argument("--model", help="Model ID for runners that accept one (claude, codex, cursor, opencode)")
+    run.add_argument("--effort", choices=EFFORT_LEVELS, help="Reasoning effort (claude, codex)")
     run.add_argument("--workspace", default=os.getcwd())
     run.add_argument("--mode", choices=("read", "write"), help="Defaults to write, or to the role's mode")
     run.add_argument("--role", help="review, critique, diagnose or implement; picks the saved agent and mode")

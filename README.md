@@ -29,6 +29,8 @@
 | Kimi Code | `kimi`、`kimi-code` |
 | Cursor | `cursor`、`cursor-agent`、`cursor-cli` |
 
+另有两个**模型快捷名**，经 Codex CLI 调用 OpenAI 最新模型：`sol` → `gpt-6.2-sol`，`astra` → `gpt-6.2-astra`。例如“用 astra 会诊这个 bug”。可加 `--effort high`，或在 `~/.oil-delegate/config.json` 的 `model_presets` 里改模型 ID。
+
 ## 怎么用
 
 ### 1. 安装 Skill

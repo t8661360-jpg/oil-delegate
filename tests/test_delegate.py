@@ -509,6 +509,59 @@ class DelegateTestCase(unittest.TestCase):
         record = self.record_of()
         self.assertIn("--always-approve", record["argv"])
 
+    def test_sol_and_astra_shortcuts_pick_codex_and_model(self) -> None:
+        self.onboard_all()
+        record_path = self.root / "record.json"
+        for shortcut, model in (("sol", "gpt-6.2-sol"), ("ASTRA", "gpt-6.2-astra")):
+            proc = self.run_cli(
+                "run", "--runner", shortcut, "--effort", "high",
+                "--workspace", str(self.workspace), "--prompt", "inspect",
+                extra_env={"FAKE_RECORD": str(record_path)},
+            )
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            result = self.result_of(proc)
+            self.assertEqual((result["runner"], result["model"], result["effort"]), ("codex", model, "high"))
+            argv = self.record_of()["argv"]
+            self.assertIn(f'model="{model}"', argv)
+            self.assertIn('model_reasoning_effort="high"', argv)
+            self.assertEqual(shlex.split(result["resume_command"])[1:3], ["-c", f'model="{model}"'])
+
+        # Resuming keeps the model and the session id stays last before stdin.
+        proc = self.run_task("sol", session="sess-1", extra_env={"FAKE_RECORD": str(record_path)})
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+        self.assertEqual(self.result_of(proc)["session_id"], "sess-1")
+        self.assertIn('model="gpt-6.2-sol"', self.record_of()["argv"])
+
+        # An explicit --model wins; runners without a model flag refuse instead of ignoring it.
+        explicit = json.loads(self.run_cli(
+            "run", "--runner", "astra", "--model", "gpt-6.3-astra", "--dry-run", "--json",
+            "--workspace", str(self.workspace), "--prompt", "x",
+        ).stdout)
+        self.assertEqual(explicit["model"], "gpt-6.3-astra")
+        refused = self.run_cli("run", "--runner", "grok", "--model", "m", "--dry-run",
+                               "--workspace", str(self.workspace), "--prompt", "x")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("--model is not supported for grok", refused.stderr)
+
+        # Shortcuts work as the default runner and as role choices, and config can override model IDs.
+        saved = json.loads(self.run_cli("config", "--set-default-runner", "astra",
+                                        "--set-role", "diagnose=sol,astra").stdout)
+        self.assertEqual(saved["default_runner"], "astra")
+        self.assertEqual(saved["roles"]["diagnose"], ["sol", "astra"])
+        default = json.loads(self.run_cli("run", "--dry-run", "--json", "--workspace",
+                                          str(self.workspace), "--prompt", "x").stdout)
+        self.assertEqual((default["runner"], default["model"]), ("codex", "gpt-6.2-astra"))
+        slot1 = json.loads(self.run_role("diagnose", "--role-slot", "1", "--dry-run", "--json").stdout)
+        self.assertEqual((slot1["model"], slot1["mode"]), ("gpt-6.2-sol", "read"))
+
+        state = Path(json.loads(self.run_cli("config").stdout)["state_dir"]) / "config.json"
+        data = json.loads(state.read_text(encoding="utf-8"))
+        data["model_presets"] = {"sol": {"model": "gpt-7-sol"}}
+        state.write_text(json.dumps(data), encoding="utf-8")
+        override = json.loads(self.run_cli("run", "--runner", "sol", "--dry-run", "--json",
+                                           "--workspace", str(self.workspace), "--prompt", "x").stdout)
+        self.assertEqual((override["runner"], override["model"]), ("codex", "gpt-7-sol"))
+
     def run_role(self, role: str, *extra: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return self.run_cli(
             "run",
